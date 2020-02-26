@@ -23,15 +23,19 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "can\sdo.hpp"
-#include "can\pdo.hpp"
-#include "can\can_drv.hpp"
-#include "motor\mi_control.hpp"
-#include "motor\motor_drv.hpp"
-#include "cpu\led_interface.h"
+#include "sdo.hpp"
+#include "pdo.hpp"
+#include "can_drv.hpp"
+#include "mi_control.hpp"
+#include "motor_drv.hpp"
+#include "led_interface.h"
 
 #include "canComModule.hpp"
 #include "math.h"
+#include "data_recorder.hpp"
+
+#include "math_functions.hpp"
+#include "control\observers.hpp"
 
 /* USER CODE END Includes */
 
@@ -59,21 +63,17 @@ extern "C"
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-volatile bool tick;
 
 const uint8_t motorNumbers = 1;
 
 CanDrv canDrv;
 MotorDrv * motor[motorNumbers];
 
-uint32_t appClk;
+volatile bool tick = false;
+volatile uint32_t appMainClk = 0;
+volatile uint32_t appClk1 = 0;
 
-volatile uint32_t counter1 = 0, cnt2 = 0;
-
-volatile uint32_t indexTable_1 = 0;
-volatile uint32_t indexTable_2 = 0;
-volatile int32_t bufData_1[8192];
-volatile int32_t bufData_2[8192];
+int32_t bufData[30000];
 
 /* USER CODE END PV */
 
@@ -94,7 +94,20 @@ static void MX_GPIO_Init(void);
   * @retval int
   */
 
+enum ControlState
+{
+	Idle = 0,
+	Initialise = 1,
+	Operate = 2
+};
+
 const float tauMax = 400;
+
+typedef RecordData4Floats recordData;
+static constexpr int recordLength = 12500;
+static constexpr int recordStep = 1;
+DataRecorder <recordLength, recordStep, recordData> recorder(bufData);
+
 int main(void)
 {
   /* USER CODE BEGIN 1 */
@@ -108,26 +121,6 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  tick = false;
-
-  appClk = 0;
-
-  Led::Init();
-  canDrv.Init(CanDrv::B1M);
-
-  MotorDrv motorDrv1(&canDrv, 2);
-  //MotorDrv motorDrv2(&canDrv, 2);
-
-  motor[0] = &motorDrv1;
-  //motor[1] = &motorDrv2;
-
-  for (auto i = 0; i < motorNumbers; i++)
-	  motor[i]->Configure();
-
-  canDrv.SendStart();
-
-  __enable_irq();
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -139,46 +132,71 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+
   /* USER CODE BEGIN 2 */
+  auto controlState = ControlState::Idle;
+  auto motorInitialised = false;
+
+  appMainClk = 0;
+
+  Led::Init();
+  canDrv.Init(CanDrv::B1M);
+
+  MotorDrv motorDrv1(&canDrv, 2);
+  //MotorDrv motorDrv2(&canDrv, 2);
+
+  motor[0] = &motorDrv1;
+  //motor[1] = &motorDrv2;
+
+  SmoothEsoSOS observer(50, 0.02, 0.001);
+
+  for (auto i = 0; i < motorNumbers; i++)
+	  motor[i]->Configure();
+
+  canDrv.SendStart();
+
+  __enable_irq();
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  bool controlActive = false;
-  float oldPos = 0;
+  float tau = 0;
 
   while (1)
   {
      if (tick)
 	 {
-	    float time = (float) appClk * 0.001;
+	    float time = (float) appMainClk * 0.001;
 	    tick = false;
 
-	    if (controlActive)
+	    switch(controlState)
 	    {
-	    	//compute the algorithm
-	    	auto vel = motor[0]->measuredVel-oldPos;
-	    	auto tau = -1*motor[0]->measuredVel-20*vel;
+	    	case ControlState::Idle:
+	    		if (motorInitialised)
+	    			controlState = ControlState::Initialise;
+	        break;
 
-	    	if (tau<-tauMax)
-	    		tau = -tauMax;
-	    	if (tau>tauMax)
-	    		tau = tauMax;
+	    	case ControlState::Initialise:
+	    		observer.InitializeEstimate(motor[0]->position);
+	    		controlState = ControlState::Operate;
+	        break;
 
-	    	oldPos = motor[0]->measuredVel;
-	    	motor[0]->desiredCurrent= tau; //1250*sinf(time);
-	    	//store data
-	   	    bufData_1[indexTable_1++] = motor[0]->measuredPos;
-	   	    bufData_2[indexTable_2++] = motor[0]->measuredVel;
-	   	    indexTable_1 &= 8192-1;
-	   	 	indexTable_2 &= 8192-1;
+	    	case ControlState::Operate:
+	    		observer(motor[0]->position, tau);
+	    		auto vel = observer.xi2;
+	    		tau = sat(-1*motor[0]->position-20*vel, -tauMax, tauMax);
+
+	    		// TODO: Conversion from tau to current
+	    		motor[0]->desiredCurrent= tau;
+	    	break;
 	    }
+
 
 	    if (motorCanSendData(motor, motorNumbers))
 	    {
 	    	SetSynchObj(&canDrv);
-	    	controlActive = true;
+	    	motorInitialised = true;
 	    }
 	    canDrv.SendStart();
 	 }
@@ -259,12 +277,12 @@ void GeneralHardwareInit()
 
 void SysTick_Handler(void)
 {
-	appClk++;
+	appMainClk++;
 
-	if (++counter1==5)
+	if (++appClk1==5)
 	{
 		tick = true;
-		counter1 = 0;
+		appClk1 = 0;
 		Led::Yellow() ^= 1;
 	}
 }

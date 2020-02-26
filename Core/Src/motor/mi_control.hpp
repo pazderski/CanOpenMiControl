@@ -1,8 +1,8 @@
 #pragma once
 
-#include "..\can\sdo.hpp"
-#include "..\can\pdo.hpp"
-#include "..\can\nmt.hpp"
+#include "sdo.hpp"
+#include "pdo.hpp"
+#include "nmt.hpp"
 
 
 namespace MiControlCmds
