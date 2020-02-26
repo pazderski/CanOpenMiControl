@@ -103,8 +103,8 @@ enum ControlState
 
 const float tauMax = 400;
 
-typedef RecordData4Floats recordData;
-static constexpr int recordLength = 12500;
+typedef RecordData2Floats recordData;
+static constexpr int recordLength = 15000;
 static constexpr int recordStep = 1;
 DataRecorder <recordLength, recordStep, recordData> recorder(bufData);
 
@@ -183,9 +183,11 @@ int main(void)
 	        break;
 
 	    	case ControlState::Operate:
-	    		observer(motor[0]->position, tau);
+	    		auto pos = motor[0]->position;
+	    		observer(pos, tau);
 	    		auto vel = observer.xi2;
 	    		tau = sat(-1*motor[0]->position-20*vel, -tauMax, tauMax);
+	    		recorder.Record(recordData{pos, vel});
 
 	    		// TODO: Conversion from tau to current
 	    		motor[0]->desiredCurrent= tau;
